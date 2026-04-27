@@ -267,8 +267,18 @@ with tab_shareholders:
 
 # ===== 5. 엑셀 다운로드 =====
 with tab_export:
-    st.markdown("받고 싶은 항목을 체크하세요. 선택한 항목들이 **하나의 엑셀 파일**에 시트별로 저장됩니다.")
+    st.markdown("**여러 기업**과 **원하는 항목**을 선택하면, 하나의 엑셀 파일에 통합되어 저장됩니다.")
 
+    # ---- 기업 다중선택 ----
+    selected_companies = st.multiselect(
+        "조회할 기업 (복수 선택 가능)",
+        options=labels,
+        default=[selected_label],
+        placeholder="기업명 또는 종목코드 입력...",
+        help="현재 사이드바에서 선택한 기업이 기본으로 들어갑니다. 여기서 추가/제거할 수 있습니다.",
+    )
+
+    st.markdown("##### 받고 싶은 항목")
     col_a, col_b = st.columns(2)
     with col_a:
         opt_overview = st.checkbox("🏢 기업개황", value=True)
@@ -278,75 +288,129 @@ with tab_export:
         opt_major = st.checkbox("👥 대량보유(5%) 보고", value=False)
         opt_exec = st.checkbox("👥 임원·주요주주 보고", value=False)
 
-    st.markdown("---")
     st.caption("📅 공시목록 기간 / 재무제표 연도·보고서는 각 탭에서 설정한 값이 그대로 적용됩니다.")
 
     selected_any = any([opt_overview, opt_disclosures, opt_finance, opt_major, opt_exec])
 
-    if not selected_any:
-        st.info("최소 1개 이상 선택해주세요.")
+    if not selected_companies:
+        st.info("기업을 1개 이상 선택해주세요.")
+    elif not selected_any:
+        st.info("받고 싶은 항목을 1개 이상 선택해주세요.")
     else:
-        if st.button("📥 엑셀 파일 생성", type="primary", use_container_width=True):
-            sheets: dict[str, pd.DataFrame] = {}
-            errors: list[str] = []
+        st.caption(f"➡️ {len(selected_companies)}개 기업 × 선택 항목 = 통합 엑셀 1파일 생성")
 
-            with st.spinner("데이터 수집 중..."):
+        if st.button("📥 엑셀 파일 생성", type="primary", use_container_width=True):
+            errors: list[str] = []
+            overview_per_company: list[tuple[str, dict]] = []
+            disclosures_dfs: list[pd.DataFrame] = []
+            finance_groups: dict[str, list[pd.DataFrame]] = {}
+            major_dfs: list[pd.DataFrame] = []
+            exec_dfs: list[pd.DataFrame] = []
+
+            progress = st.progress(0.0, text="시작...")
+            n_total = len(selected_companies)
+
+            def with_company_col(df: pd.DataFrame, cname: str, ccode: str) -> pd.DataFrame:
+                """DataFrame 앞에 기업명/종목코드 컬럼 추가."""
+                out = df.copy()
+                out.insert(0, "기업명", cname)
+                out.insert(1, "종목코드", ccode)
+                return out
+
+            for i, label in enumerate(selected_companies):
+                row = corp_df[corp_df["_label"] == label].iloc[0]
+                ccode = row["stock_code"]
+                cname = row["corp_name"]
+                corp_key = ccode if ccode else cname
+
+                progress.progress((i + 1) / n_total, text=f"{cname} 조회 중... ({i + 1}/{n_total})")
+
                 if opt_overview:
                     try:
-                        sheets["기업개황"] = pd.DataFrame(
-                            list(company.items()), columns=["항목", "값"]
-                        )
+                        comp = fetch_company(corp_key)
+                        if comp:
+                            overview_per_company.append((cname, comp))
                     except Exception as e:
-                        errors.append(f"기업개황: {e}")
+                        errors.append(f"[{cname}] 기업개황: {e}")
 
                 if opt_disclosures:
                     try:
-                        df_d = fetch_list(corp_input, start, end)
+                        df_d = fetch_list(corp_key, start, end)
                         if df_d is not None and len(df_d) > 0:
-                            sheets["공시목록"] = df_d
-                        else:
-                            errors.append("공시목록: 해당 기간에 데이터 없음")
+                            disclosures_dfs.append(with_company_col(df_d, cname, ccode))
                     except Exception as e:
-                        errors.append(f"공시목록: {e}")
+                        errors.append(f"[{cname}] 공시목록: {e}")
 
                 if opt_finance:
                     try:
-                        fs_all = fetch_finstate(corp_input, year, reprt_code)
+                        fs_all = fetch_finstate(corp_key, year, reprt_code)
                         if fs_all is not None and len(fs_all) > 0:
-                            if "sj_nm" in fs_all.columns:
-                                for sj_name, sub in fs_all.groupby("sj_nm"):
-                                    sheet_name = f"재무_{sj_name}"[:31]
-                                    sheets[sheet_name] = sub.reset_index(drop=True)
+                            tagged = with_company_col(fs_all, cname, ccode)
+                            if "sj_nm" in tagged.columns:
+                                for sj_name, sub in tagged.groupby("sj_nm"):
+                                    finance_groups.setdefault(sj_name, []).append(
+                                        sub.reset_index(drop=True)
+                                    )
                             else:
-                                sheets["재무제표"] = fs_all
-                        else:
-                            errors.append("재무제표: 해당 보고서 없음")
+                                finance_groups.setdefault("재무제표", []).append(tagged)
                     except Exception as e:
-                        errors.append(f"재무제표: {e}")
+                        errors.append(f"[{cname}] 재무제표: {e}")
 
                 if opt_major:
                     try:
-                        df_m = fetch_major_shareholders(corp_input)
+                        df_m = fetch_major_shareholders(corp_key)
                         if df_m is not None and len(df_m) > 0:
-                            sheets["대량보유"] = df_m
-                        else:
-                            errors.append("대량보유: 데이터 없음")
+                            major_dfs.append(with_company_col(df_m, cname, ccode))
                     except Exception as e:
-                        errors.append(f"대량보유: {e}")
+                        errors.append(f"[{cname}] 대량보유: {e}")
 
                 if opt_exec:
                     try:
-                        df_e = fetch_major_shareholders_exec(corp_input)
+                        df_e = fetch_major_shareholders_exec(corp_key)
                         if df_e is not None and len(df_e) > 0:
-                            sheets["임원주요주주"] = df_e
-                        else:
-                            errors.append("임원주요주주: 데이터 없음")
+                            exec_dfs.append(with_company_col(df_e, cname, ccode))
                     except Exception as e:
-                        errors.append(f"임원주요주주: {e}")
+                        errors.append(f"[{cname}] 임원주요주주: {e}")
+
+            progress.empty()
+
+            # ---- 시트 빌드 ----
+            sheets: dict[str, pd.DataFrame] = {}
+
+            if overview_per_company:
+                # 기업개황은 비교가 쉽도록 wide 포맷: 항목 | 회사1 | 회사2 | ...
+                all_keys: list[str] = []
+                for _, comp in overview_per_company:
+                    for k in comp.keys():
+                        if k not in all_keys:
+                            all_keys.append(k)
+                wide = {"항목": all_keys}
+                for cname, comp in overview_per_company:
+                    col_name = cname
+                    suffix = 2
+                    while col_name in wide:
+                        col_name = f"{cname}_{suffix}"
+                        suffix += 1
+                    wide[col_name] = [comp.get(k, "") for k in all_keys]
+                sheets["기업개황"] = pd.DataFrame(wide)
+
+            if disclosures_dfs:
+                sheets["공시목록"] = pd.concat(disclosures_dfs, ignore_index=True)
+
+            for sj_name, dfs in finance_groups.items():
+                sheet_name = f"재무_{sj_name}"[:31]
+                sheets[sheet_name] = pd.concat(dfs, ignore_index=True)
+
+            if major_dfs:
+                sheets["대량보유"] = pd.concat(major_dfs, ignore_index=True)
+
+            if exec_dfs:
+                sheets["임원주요주주"] = pd.concat(exec_dfs, ignore_index=True)
 
             if errors:
-                for msg in errors:
-                    st.warning(msg)
+                with st.expander(f"⚠️ 일부 항목 누락 ({len(errors)}건)"):
+                    for msg in errors:
+                        st.write(f"- {msg}")
 
             if not sheets:
                 st.error("저장할 데이터가 없습니다.")
@@ -372,9 +436,12 @@ with tab_export:
 
                 buffer.seek(0)
                 today_str = date.today().strftime("%Y%m%d")
-                filename = f"DART_{display_name}_{today_str}.xlsx"
+                if len(selected_companies) == 1:
+                    filename = f"DART_{overview_per_company[0][0] if overview_per_company else display_name}_{today_str}.xlsx"
+                else:
+                    filename = f"DART_{len(selected_companies)}개기업_{today_str}.xlsx"
 
-                st.success(f"✅ {len(sheets)}개 시트 생성 완료")
+                st.success(f"✅ {len(selected_companies)}개 기업 × {len(sheets)}개 시트 생성 완료")
                 st.download_button(
                     label=f"⬇️ {filename} 다운로드",
                     data=buffer,
