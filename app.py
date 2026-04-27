@@ -3,6 +3,7 @@ import pandas as pd
 import plotly.express as px
 import OpenDartReader
 from datetime import date, timedelta
+from io import BytesIO
 
 st.set_page_config(page_title="DART 기업정보 조회", page_icon="📊", layout="wide")
 
@@ -120,8 +121,8 @@ if not company or "corp_name" not in company:
     st.stop()
 
 # ---------- 탭 ----------
-tab_overview, tab_disclosures, tab_finance, tab_shareholders = st.tabs(
-    ["🏢 기업개황", "📰 공시목록", "💰 재무제표", "👥 지분공시"]
+tab_overview, tab_disclosures, tab_finance, tab_shareholders, tab_export = st.tabs(
+    ["🏢 기업개황", "📰 공시목록", "💰 재무제표", "👥 지분공시", "📥 엑셀 다운로드"]
 )
 
 # ===== 1. 기업개황 =====
@@ -263,3 +264,121 @@ with tab_shareholders:
                 st.dataframe(mse, use_container_width=True, hide_index=True)
         except Exception as e:
             st.error(f"조회 실패: {e}")
+
+# ===== 5. 엑셀 다운로드 =====
+with tab_export:
+    st.markdown("받고 싶은 항목을 체크하세요. 선택한 항목들이 **하나의 엑셀 파일**에 시트별로 저장됩니다.")
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        opt_overview = st.checkbox("🏢 기업개황", value=True)
+        opt_disclosures = st.checkbox("📰 공시목록", value=True)
+        opt_finance = st.checkbox("💰 재무제표", value=True)
+    with col_b:
+        opt_major = st.checkbox("👥 대량보유(5%) 보고", value=False)
+        opt_exec = st.checkbox("👥 임원·주요주주 보고", value=False)
+
+    st.markdown("---")
+    st.caption("📅 공시목록 기간 / 재무제표 연도·보고서는 각 탭에서 설정한 값이 그대로 적용됩니다.")
+
+    selected_any = any([opt_overview, opt_disclosures, opt_finance, opt_major, opt_exec])
+
+    if not selected_any:
+        st.info("최소 1개 이상 선택해주세요.")
+    else:
+        if st.button("📥 엑셀 파일 생성", type="primary", use_container_width=True):
+            sheets: dict[str, pd.DataFrame] = {}
+            errors: list[str] = []
+
+            with st.spinner("데이터 수집 중..."):
+                if opt_overview:
+                    try:
+                        sheets["기업개황"] = pd.DataFrame(
+                            list(company.items()), columns=["항목", "값"]
+                        )
+                    except Exception as e:
+                        errors.append(f"기업개황: {e}")
+
+                if opt_disclosures:
+                    try:
+                        df_d = fetch_list(corp_input, start, end)
+                        if df_d is not None and len(df_d) > 0:
+                            sheets["공시목록"] = df_d
+                        else:
+                            errors.append("공시목록: 해당 기간에 데이터 없음")
+                    except Exception as e:
+                        errors.append(f"공시목록: {e}")
+
+                if opt_finance:
+                    try:
+                        fs_all = fetch_finstate(corp_input, year, reprt_code)
+                        if fs_all is not None and len(fs_all) > 0:
+                            if "sj_nm" in fs_all.columns:
+                                for sj_name, sub in fs_all.groupby("sj_nm"):
+                                    sheet_name = f"재무_{sj_name}"[:31]
+                                    sheets[sheet_name] = sub.reset_index(drop=True)
+                            else:
+                                sheets["재무제표"] = fs_all
+                        else:
+                            errors.append("재무제표: 해당 보고서 없음")
+                    except Exception as e:
+                        errors.append(f"재무제표: {e}")
+
+                if opt_major:
+                    try:
+                        df_m = fetch_major_shareholders(corp_input)
+                        if df_m is not None and len(df_m) > 0:
+                            sheets["대량보유"] = df_m
+                        else:
+                            errors.append("대량보유: 데이터 없음")
+                    except Exception as e:
+                        errors.append(f"대량보유: {e}")
+
+                if opt_exec:
+                    try:
+                        df_e = fetch_major_shareholders_exec(corp_input)
+                        if df_e is not None and len(df_e) > 0:
+                            sheets["임원주요주주"] = df_e
+                        else:
+                            errors.append("임원주요주주: 데이터 없음")
+                    except Exception as e:
+                        errors.append(f"임원주요주주: {e}")
+
+            if errors:
+                for msg in errors:
+                    st.warning(msg)
+
+            if not sheets:
+                st.error("저장할 데이터가 없습니다.")
+            else:
+                buffer = BytesIO()
+                with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
+                    workbook = writer.book
+                    header_fmt = workbook.add_format({
+                        "bold": True, "bg_color": "#D9E1F2", "border": 1,
+                    })
+                    for sheet_name, df_sheet in sheets.items():
+                        safe_name = sheet_name[:31]
+                        df_sheet.to_excel(writer, sheet_name=safe_name, index=False)
+                        ws = writer.sheets[safe_name]
+                        for col_idx, col_name in enumerate(df_sheet.columns):
+                            ws.write(0, col_idx, str(col_name), header_fmt)
+                            max_len = max(
+                                df_sheet[col_name].astype(str).map(len).max() if len(df_sheet) else 0,
+                                len(str(col_name)),
+                            )
+                            ws.set_column(col_idx, col_idx, min(max_len + 2, 50))
+                        ws.freeze_panes(1, 0)
+
+                buffer.seek(0)
+                today_str = date.today().strftime("%Y%m%d")
+                filename = f"DART_{display_name}_{today_str}.xlsx"
+
+                st.success(f"✅ {len(sheets)}개 시트 생성 완료")
+                st.download_button(
+                    label=f"⬇️ {filename} 다운로드",
+                    data=buffer,
+                    file_name=filename,
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                )
