@@ -27,6 +27,19 @@ dart = get_dart()
 
 
 # ---------- 캐시된 조회 함수 ----------
+@st.cache_data(ttl=86400)
+def load_corp_list(listed_only: bool = True) -> pd.DataFrame:
+    """전체 기업 목록 DataFrame. 하루 1회 캐싱."""
+    df = dart.corp_codes.copy()
+    df["corp_name"] = df["corp_name"].astype(str).str.strip()
+    df["stock_code"] = df["stock_code"].astype(str).str.strip()
+    df = df[df["corp_name"] != ""]
+    if listed_only:
+        df = df[df["stock_code"].str.match(r"^\d{6}$", na=False)]
+    df = df.drop_duplicates(subset=["corp_name", "stock_code"]).reset_index(drop=True)
+    return df
+
+
 @st.cache_data(ttl=3600)
 def fetch_company(corp):
     return dart.company(corp)
@@ -54,7 +67,38 @@ def fetch_major_shareholders_exec(corp):
 
 # ---------- 사이드바 ----------
 st.sidebar.title("📊 DART 조회")
-corp_input = st.sidebar.text_input("기업명 또는 종목코드", value="삼성전자")
+
+listed_only = st.sidebar.toggle("상장사만 보기", value=True, help="끄면 비상장사 포함 전체 기업")
+
+with st.spinner("기업 목록 로딩 중..."):
+    corp_df = load_corp_list(listed_only=listed_only)
+
+# selectbox에 표시할 라벨 ("삼성전자 (005930)")
+def make_label(row):
+    code = row["stock_code"]
+    return f"{row['corp_name']} ({code})" if code and code.strip() else row["corp_name"]
+
+
+corp_df = corp_df.assign(_label=corp_df.apply(make_label, axis=1))
+labels = corp_df["_label"].tolist()
+
+# 기본값: 삼성전자 (있으면)
+default_idx = 0
+samsung_match = corp_df.index[corp_df["corp_name"] == "삼성전자"].tolist()
+if samsung_match:
+    default_idx = labels.index(corp_df.loc[samsung_match[0], "_label"])
+
+selected_label = st.sidebar.selectbox(
+    f"기업 검색 ({len(labels):,}개)",
+    options=labels,
+    index=default_idx,
+    placeholder="기업명 또는 종목코드 입력...",
+    help="입력하면 자동으로 후보가 좁혀집니다.",
+)
+
+selected_row = corp_df[corp_df["_label"] == selected_label].iloc[0]
+corp_input = selected_row["stock_code"] if selected_row["stock_code"] else selected_row["corp_name"]
+display_name = selected_row["corp_name"]
 
 st.sidebar.markdown("---")
 st.sidebar.caption("데이터 출처: DART OpenAPI")
@@ -62,11 +106,7 @@ st.sidebar.caption("https://opendart.fss.or.kr/")
 
 
 # ---------- 메인 ----------
-st.title(f"📊 {corp_input}")
-
-if not corp_input:
-    st.info("좌측에 기업명 또는 종목코드를 입력하세요.")
-    st.stop()
+st.title(f"📊 {display_name}")
 
 # 기업개황으로 유효성 확인
 try:
@@ -76,7 +116,7 @@ except Exception as e:
     st.stop()
 
 if not company or "corp_name" not in company:
-    st.warning("해당 기업을 찾을 수 없습니다. 정확한 기업명 또는 종목코드를 입력해주세요.")
+    st.warning("기업 정보를 가져올 수 없습니다.")
     st.stop()
 
 # ---------- 탭 ----------
