@@ -280,7 +280,8 @@ with tab_export:
         cols_bulk = st.columns([1, 1, 3])
         if cols_bulk[0].button("➕ 추가", use_container_width=True):
             tokens = [t.strip() for t in bulk_text.replace(",", "\n").splitlines() if t.strip()]
-            current = set(st.session_state.get("multi_corp", [selected_label]))
+            current_list: list[str] = list(st.session_state.get("multi_corp", [selected_label]))
+            new_labels: list[str] = []
             matched: list[str] = []
             unmatched: list[str] = []
             for tok in tokens:
@@ -298,9 +299,12 @@ with tab_export:
                 if hit.empty:
                     unmatched.append(tok)
                 else:
-                    current.add(hit.iloc[0]["_label"])
+                    lab = hit.iloc[0]["_label"]
                     matched.append(hit.iloc[0]["corp_name"])
-            st.session_state["multi_corp"] = [l for l in labels if l in current]
+                    if lab not in current_list and lab not in new_labels:
+                        new_labels.append(lab)
+            # 기존 선택은 위치 유지, 새로 매칭된 기업은 붙여넣기 순서대로 뒤에 추가
+            st.session_state["multi_corp"] = current_list + new_labels
             st.session_state["bulk_matched"] = matched
             st.session_state["bulk_unmatched"] = unmatched
             st.rerun()
