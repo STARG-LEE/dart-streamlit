@@ -269,13 +269,64 @@ with tab_shareholders:
 with tab_export:
     st.markdown("**여러 기업**과 **원하는 항목**을 선택하면, 하나의 엑셀 파일에 통합되어 저장됩니다.")
 
+    # ---- 일괄 입력 (붙여넣기) ----
+    with st.expander("📋 기업명 일괄 붙여넣기 (여러 줄/쉼표 구분)"):
+        bulk_text = st.text_area(
+            "기업명 또는 종목코드를 줄바꿈 또는 쉼표로 구분해서 붙여넣으세요",
+            height=150,
+            placeholder="세니젠\n코이즈\n씨엑스아이\n...",
+            key="bulk_input",
+        )
+        cols_bulk = st.columns([1, 1, 3])
+        if cols_bulk[0].button("➕ 추가", use_container_width=True):
+            tokens = [t.strip() for t in bulk_text.replace(",", "\n").splitlines() if t.strip()]
+            current = set(st.session_state.get("multi_corp", [selected_label]))
+            matched: list[str] = []
+            unmatched: list[str] = []
+            for tok in tokens:
+                # 1) 종목코드(6자리) 정확매치
+                if tok.isdigit() and len(tok) == 6:
+                    hit = corp_df[corp_df["stock_code"] == tok]
+                # 2) 기업명 정확매치
+                else:
+                    hit = corp_df[corp_df["corp_name"] == tok]
+                    if hit.empty:
+                        # 3) 기업명 부분일치 (1건만 매칭될 때 채택)
+                        partial = corp_df[corp_df["corp_name"].str.contains(tok, regex=False, na=False)]
+                        if len(partial) == 1:
+                            hit = partial
+                if hit.empty:
+                    unmatched.append(tok)
+                else:
+                    current.add(hit.iloc[0]["_label"])
+                    matched.append(hit.iloc[0]["corp_name"])
+            st.session_state["multi_corp"] = [l for l in labels if l in current]
+            st.session_state["bulk_matched"] = matched
+            st.session_state["bulk_unmatched"] = unmatched
+            st.rerun()
+        if cols_bulk[1].button("🗑️ 비우기", use_container_width=True):
+            st.session_state["multi_corp"] = []
+            st.rerun()
+
+        if st.session_state.get("bulk_matched"):
+            st.success(f"✅ {len(st.session_state['bulk_matched'])}개 매칭: " + ", ".join(st.session_state["bulk_matched"]))
+        if st.session_state.get("bulk_unmatched"):
+            st.warning(
+                f"⚠️ {len(st.session_state['bulk_unmatched'])}개 매칭 실패: "
+                + ", ".join(st.session_state["bulk_unmatched"])
+                + "  (정확한 기업명 또는 종목코드로 다시 시도해보세요)"
+            )
+
     # ---- 기업 다중선택 ----
+    if "multi_corp" not in st.session_state:
+        st.session_state["multi_corp"] = [selected_label]
+
     selected_companies = st.multiselect(
         "조회할 기업 (복수 선택 가능)",
         options=labels,
-        default=[selected_label],
+        key="multi_corp",
         placeholder="기업명 또는 종목코드 입력...",
-        help="현재 사이드바에서 선택한 기업이 기본으로 들어갑니다. 여기서 추가/제거할 수 있습니다.",
+        help="위의 '일괄 붙여넣기'로 여러 기업을 한 번에 추가할 수 있습니다.",
     )
 
     st.markdown("##### 받고 싶은 항목")
